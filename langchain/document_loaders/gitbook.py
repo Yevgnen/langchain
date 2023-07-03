@@ -1,4 +1,5 @@
 """Loader that loads GitBook."""
+import concurrent.futures
 from typing import Any, List, Optional
 from urllib.parse import urljoin, urlparse
 
@@ -19,6 +20,7 @@ class GitbookLoader(WebBaseLoader):
         load_all_paths: bool = False,
         base_url: Optional[str] = None,
         content_selector: str = "main",
+        max_workers: int = 1,
     ):
         """Initialize with web page and whether to load all paths.
 
@@ -31,6 +33,7 @@ class GitbookLoader(WebBaseLoader):
                 appended to this base url. Defaults to `web_page`.
             content_selector: The CSS selector for the content to load.
                 Defaults to "main".
+            max_workers: Numbers of workers to load pages. Defaults to 1.
         """
         self.base_url = base_url or web_page
         if self.base_url.endswith("/"):
@@ -43,23 +46,41 @@ class GitbookLoader(WebBaseLoader):
         super().__init__(web_paths)
         self.load_all_paths = load_all_paths
         self.content_selector = content_selector
+        self.max_workers = max_workers
 
     def load(self) -> List[Document]:
         """Fetch text from one single GitBook page."""
-        if self.load_all_paths:
-            soup_info = self.scrape()
-            relative_paths = self._get_paths(soup_info)
+
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=self.max_workers
+        ) as executor:
+            futures = []
+
+            if self.load_all_paths:
+                soup_info = self.scrape()
+                relative_paths = self._get_paths(soup_info)
+                for path in relative_paths:
+                    url = urljoin(self.base_url, path)
+                    print(f"Fetching text from {url}")
+
+                    futures += [executor.submit(self._load_inner, soup_info, url)]
+            else:
+                soup_info = self.scrape()
+                futures += [executor.submit(self._load_inner, soup_info, self.web_path)]
+
             documents = []
-            for path in relative_paths:
-                url = urljoin(self.base_url, path)
-                print(f"Fetching text from {url}")
-                soup_info = self._scrape(url)
-                documents.append(self._get_document(soup_info, url))
-            return [d for d in documents if d]
-        else:
-            soup_info = self.scrape()
-            documents = [self._get_document(soup_info, self.web_path)]
-            return [d for d in documents if d]
+            for future in concurrent.futures.as_completed(futures):
+                document = future.result()
+                if document:
+                    documents += [document]
+
+            return documents
+
+    def _load_inner(self, soup: Any, url: str) -> Optional[Document]:
+        soup_info = self._scrape(url)
+        document = self._get_document(soup_info, url)
+
+        return document
 
     def _get_document(
         self, soup: Any, custom_url: Optional[str] = None
